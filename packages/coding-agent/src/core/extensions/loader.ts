@@ -156,6 +156,9 @@ export function createExtensionRuntime(): ExtensionRuntime {
 				message ??
 				"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().";
 		},
+		clearStaleMessage: () => {
+			state.staleMessage = undefined;
+		},
 		// Pre-bind: queue registrations so bindCore() can flush them once the
 		// model registry is available. bindCore() replaces both with direct calls.
 		registerProvider: (name, config, extensionPath = "<unknown>") => {
@@ -328,9 +331,54 @@ function createExtensionAPI(
 	return api;
 }
 
-async function loadExtensionModule(extensionPath: string) {
+// Native extension loader (replaces jiti for faster startup)
+let _nativeLoaderRegistered = false;
+let _nativeLoaderAvailable = false;
+
+async function registerNativeLoader(): Promise<void> {
+	if (_nativeLoaderRegistered) return;
+	_nativeLoaderRegistered = true;
+	try {
+		const { register } = await import("node:module");
+		register("./pi-loader.mjs", import.meta.url);
+		_nativeLoaderAvailable = true;
+	} catch {
+		_nativeLoaderAvailable = false;
+	}
+}
+
+async function loadExtensionModule(extensionPath: string, { bustCache = false }: { bustCache?: boolean } = {}) {
+	// Try native import first (uses our pi-loader for aliases + .ts compilation)
+	await registerNativeLoader();
+	if (_nativeLoaderAvailable && !isBunBinary) {
+		try {
+			let importPath = extensionPath;
+			// Resolve directory paths to actual entry files before cache busting
+			if (fs.existsSync(importPath) && fs.statSync(importPath).isDirectory()) {
+				for (const entry of ["index.ts", "index.js", "dist/index.js"]) {
+					const entryPath = path.join(importPath, entry);
+					if (fs.existsSync(entryPath)) {
+						importPath = entryPath;
+						break;
+					}
+				}
+			}
+			// Cache busting: append ?t= to force Node.js to reload the module from disk
+			const importUrl = bustCache ? `${importPath}?t=${Date.now()}` : importPath;
+			const mod = await import(importUrl);
+			const factory = mod && ((mod.default || mod) as ExtensionFactory);
+			if (typeof factory === "function") {
+				return factory;
+			}
+		} catch {
+			// Native import failed — fall back to jiti
+		}
+	}
+
+	// Fallback: use jiti
 	const jiti = createJiti(import.meta.url, {
-		moduleCache: false,
+		moduleCache: true,
+		fsCache: true,
 		// In Bun binary: use virtualModules for bundled packages (no filesystem resolution)
 		// Also disable tryNative so jiti handles ALL imports (not just the entry point)
 		// In Node.js/dev: use aliases to resolve to node_modules paths
@@ -370,11 +418,12 @@ async function loadExtension(
 	cwd: string,
 	eventBus: EventBus,
 	runtime: ExtensionRuntime,
+	{ bustCache = false }: { bustCache?: boolean } = {},
 ): Promise<{ extension: Extension | null; error: string | null }> {
 	const resolvedPath = resolvePath(extensionPath, cwd, { normalizeUnicodeSpaces: true });
 
 	try {
-		const factory = await loadExtensionModule(resolvedPath);
+		const factory = await loadExtensionModule(resolvedPath, { bustCache });
 		if (!factory) {
 			return { extension: null, error: `Extension does not export a valid factory function: ${extensionPath}` };
 		}
@@ -410,7 +459,12 @@ export async function loadExtensionFromFactory(
 /**
  * Load extensions from paths.
  */
-export async function loadExtensions(paths: string[], cwd: string, eventBus?: EventBus): Promise<LoadExtensionsResult> {
+export async function loadExtensions(
+	paths: string[],
+	cwd: string,
+	eventBus?: EventBus,
+	{ bustCache = false }: { bustCache?: boolean } = {},
+): Promise<LoadExtensionsResult> {
 	const extensions: Extension[] = [];
 	const errors: Array<{ path: string; error: string }> = [];
 	const resolvedCwd = resolvePath(cwd);
@@ -418,7 +472,7 @@ export async function loadExtensions(paths: string[], cwd: string, eventBus?: Ev
 	const runtime = createExtensionRuntime();
 
 	for (const extPath of paths) {
-		const { extension, error } = await loadExtension(extPath, resolvedCwd, resolvedEventBus, runtime);
+		const { extension, error } = await loadExtension(extPath, resolvedCwd, resolvedEventBus, runtime, { bustCache });
 
 		if (error) {
 			errors.push({ path: extPath, error });

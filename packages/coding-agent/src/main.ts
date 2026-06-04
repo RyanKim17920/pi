@@ -30,6 +30,7 @@ import { KeybindingsManager } from "./core/keybindings.ts";
 import type { ModelRegistry } from "./core/model-registry.ts";
 import { resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
+import type { ResourceLoader } from "./core/resource-loader.ts";
 import type { CreateAgentSessionOptions } from "./core/sdk.ts";
 import {
 	formatMissingSessionCwdPrompt,
@@ -586,6 +587,11 @@ export async function main(args: string[], options?: MainOptions) {
 	const resolvedPromptTemplatePaths = resolveCliPaths(cwd, parsed.promptTemplates);
 	const resolvedThemePaths = resolveCliPaths(cwd, parsed.themes);
 	const authStorage = AuthStorage.create();
+
+	// Reuse resourceLoader across session lifecycle events (fork/new/switch)
+	// to avoid re-scanning and re-loading all extensions every time.
+	let _sharedResourceLoader: ResourceLoader | null = null;
+
 	const createRuntime: CreateAgentSessionRuntimeFactory = async ({
 		cwd,
 		agentDir,
@@ -596,6 +602,7 @@ export async function main(args: string[], options?: MainOptions) {
 			cwd,
 			agentDir,
 			authStorage,
+			resourceLoader: _sharedResourceLoader ?? undefined,
 			extensionFlagValues: parsed.unknownFlags,
 			resourceLoaderOptions: {
 				additionalExtensionPaths: resolvedExtensionPaths,
@@ -612,6 +619,11 @@ export async function main(args: string[], options?: MainOptions) {
 				extensionFactories: options?.extensionFactories,
 			},
 		});
+		// Store the resourceLoader for reuse on subsequent lifecycle calls
+		if (!_sharedResourceLoader) {
+			_sharedResourceLoader = services.resourceLoader;
+		}
+
 		const { settingsManager, modelRegistry, resourceLoader } = services;
 		const diagnostics: AgentSessionRuntimeDiagnostic[] = [
 			...services.diagnostics,

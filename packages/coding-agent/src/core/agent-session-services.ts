@@ -36,6 +36,10 @@ export interface CreateAgentSessionServicesOptions {
 	authStorage?: AuthStorage;
 	settingsManager?: SettingsManager;
 	modelRegistry?: ModelRegistry;
+	/** Reuse an existing resourceLoader instead of creating a new one.
+	 * This avoids re-scanning and re-loading all extensions on every
+	 * session lifecycle event (fork, new, switch). */
+	resourceLoader?: ResourceLoader;
 	extensionFlagValues?: Map<string, boolean | string>;
 	resourceLoaderOptions?: Omit<DefaultResourceLoaderOptions, "cwd" | "agentDir" | "settingsManager">;
 }
@@ -136,13 +140,20 @@ export async function createAgentSessionServices(
 	const authStorage = options.authStorage ?? AuthStorage.create(join(agentDir, "auth.json"));
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
 	const modelRegistry = options.modelRegistry ?? ModelRegistry.create(authStorage, join(agentDir, "models.json"));
-	const resourceLoader = new DefaultResourceLoader({
-		...(options.resourceLoaderOptions ?? {}),
-		cwd,
-		agentDir,
-		settingsManager,
-	});
-	await resourceLoader.reload();
+
+	// Reuse existing resourceLoader if provided (avoids re-loading all extensions on fork/new/switch)
+	const resourceLoader =
+		options.resourceLoader ??
+		(await (async () => {
+			const rl = new DefaultResourceLoader({
+				...(options.resourceLoaderOptions ?? {}),
+				cwd,
+				agentDir,
+				settingsManager,
+			});
+			await rl.reload();
+			return rl;
+		})());
 
 	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
 	const extensionsResult = resourceLoader.getExtensions();

@@ -264,6 +264,8 @@ export class ExtensionRunner {
 		this.cwd = cwd;
 		this.sessionManager = sessionManager;
 		this.modelRegistry = modelRegistry;
+		// Clear any stale state inherited from a previous session's runtime
+		this.runtime.clearStaleMessage?.();
 	}
 
 	bindCore(
@@ -472,8 +474,8 @@ export class ExtensionRunner {
 		message = "This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
 	): void {
 		if (!this.staleMessage) {
-			this.staleMessage = message;
 			this.runtime.invalidate(message);
+			this.staleMessage = message;
 		}
 	}
 
@@ -825,13 +827,24 @@ export class ExtensionRunner {
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
-				const handlerResult = await handler(event, ctx);
+				try {
+					const handlerResult = await handler(event, ctx);
 
-				if (handlerResult) {
-					result = handlerResult as ToolCallEventResult;
-					if (result.block) {
-						return result;
+					if (handlerResult) {
+						result = handlerResult as ToolCallEventResult;
+						if (result.block) {
+							return result;
+						}
 					}
+				} catch (err) {
+					const message = err instanceof Error ? err.message : String(err);
+					const stack = err instanceof Error ? err.stack : undefined;
+					this.emitError({
+						extensionPath: ext.path,
+						event: "tool_call",
+						error: message,
+						stack,
+					});
 				}
 			}
 		}

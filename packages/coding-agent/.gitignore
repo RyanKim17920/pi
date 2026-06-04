@@ -1,1 +1,11 @@
 *.bun-build
+FINDINGS.md
+bench-out.txt
+verify-*.mjs
+CLONE-SLOW-INVESTIGATION.md
+reload-investigation.md
+approach-research.md
+benchmark/
+benchmark-test/
+test-cache-bust*
+_answer.*
